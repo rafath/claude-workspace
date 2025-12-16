@@ -1,3 +1,8 @@
+---
+remote: fork
+parent_branch: main
+---
+
 ## Workspace Configuration
 
 This file guides Claude through the operational constraints applicable to this workspace.
@@ -9,9 +14,10 @@ This file guides Claude through the operational constraints applicable to this w
 
 ### Merge Strategy
 
+_Default: Full history merge_
+
 - [x] Squash merge
 - [ ] Rebase merge
-- [ ] Merge commit
 
 ### Post-Merge
 

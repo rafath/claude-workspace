@@ -2,6 +2,5 @@
 
 # Protect workspace template and other files on main branch during merges
 dev/workspace/** merge=protect
-dev/workspace/project/** -merge
 .claude/config/** merge=ours
 README.md merge=ours
