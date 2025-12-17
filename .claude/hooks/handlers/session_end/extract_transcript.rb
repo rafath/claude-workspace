@@ -236,7 +236,7 @@ private
   def rename_transcript(output_file)
     log 'Processing Conversation...'
 
-    script_path = File.join(cwd, 'dev/run/process_conversation')
+    script_path = File.join(cwd, 'dev/run/process-conversation')
 
     unless File.exist?(script_path)
       log "Rename script not found: #{script_path}", level: :warn
