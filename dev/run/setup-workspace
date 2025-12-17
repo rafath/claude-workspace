@@ -1,5 +1,7 @@
 #!/bin/bash
 
+### Initialise workspace merge drivers and remote branches.
+
 # This config file only needs to be run once to initialise workspace settings.
 
 # Merge driver (idempotent). Use the `protect` driver in .gitattributes on dev/workspace
