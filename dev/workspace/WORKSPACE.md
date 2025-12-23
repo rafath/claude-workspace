@@ -3,41 +3,41 @@ remote: origin
 parent_branch: main
 ---
 
-## Workspace Configuration
+# Workspace Management & Configuration
 
 This file guides Claude through the operational constraints applicable to this workspace.
 
-### Track Issues
+## Track Issues
 
 - [ ] Track GitHub issues
     - <!-- Add issue numbers: #123, #456 -->
 
-### Merge Strategy
+## Merge Strategy
 
 _Default: Full history merge_
 
 - [x] Squash merge
 - [ ] Rebase merge
 
-### Post-Merge
+## Post-Merge
 
 - [ ] Delete branch after merge
 - [x] Archive workspace upon merge
   > **Archive Instructions:**
   > run the `/archive-workspace` SlashCommand Tool before merging the Branch.
 
-### Workflow Type
+## Workflow Type
 
 - [ ] Quick (direct implementation)
 - [ ] Single plan (plan once, execute)
 - [ ] Multi-stage plan (iterative planning)
 
-### Testing
+## Testing
 
 - [ ] Requires testing
   > Update relevant tests as per testing strategy. All tests must pass before PR.
 
-### Plans currently available
+## Plans currently available
 
 If selected please read the file at the start of the session before starting work
 
