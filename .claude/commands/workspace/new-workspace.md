@@ -67,6 +67,7 @@ git checkout -b {branch-name} origin/command
 ```
 
 If branch exists, checkout existing.
+If origin/branch does not exist, check if local has been pushed yet.
 
 ### Step 6: Update CLAUDE.md
 
