@@ -17,6 +17,8 @@ $ARGUMENTS
 
 !`git branch`
 
+check `dev/run/new-workspace` exists
+
 ## Workflow
 
 ### Step 1: Validate Arguments
@@ -45,37 +47,84 @@ Sanitization:
 - Remove special chars except hyphens
 - Max ~40 chars
 
-### Step 4: Check Git State
+### Step 4: Detect Path
+
+Check current branch and script availability:
+
+**Path 1 - Script available + on parent branch:**
+If `dev/run/new-branch` exists AND on `main` or `command` branch, go to Step 5a.
+
+**Path 2 - Already on similar feature branch:**
+If current branch name closely matches the intended purpose (e.g., user wants "add login feature" and already on `feature/add-login`), go to Step 5b.
+
+**Path 3 - Fallback:**
+Otherwise, go to Step 5c.
+
+### Step 5a: User Runs Script
+
+Provide the command for user to run:
+
+```
+✓ Branch name: {branch-name}
+
+Please run:
+  dev/run/new-branch {branch-name}
+
+Let me know when complete.
+```
+
+Wait for user confirmation, then proceed to Step 6.
+
+### Step 5b: Existing Branch
+
+Ask user:
+
+```
+You're already on '{current-branch}' which matches your description.
+
+Is this the branch you want to work from?
+```
+
+If yes, proceed to Step 6.
+If no, ask if they want Path 1 (run script) or Path 3 (Claude creates branch).
+
+### Step 5c: Claude Creates Branch
+
+Ask user:
+
+```
+Script not available or not on parent branch.
+
+Would you like me to create the branch with git commands?
+```
+
+If yes:
 
 **Uncommitted changes:** Stop. "Commit or stash before creating new branch."
 
-**Command branch:** If `command` branch is available. Ensure it is checked out. If not, confirm switch to `command`
-
-**Main branch:** If no `command` branch, Ensure `main` is checked out. If not, confirm switch to `main`
-
-### Step 5: Fetch & Create Branch
-
 **IF** on `main` branch:
+
 ```bash
-git fetch origin main
-git checkout -b {branch-name} origin/main
-```
-**IF** on `command` branch:
-```bash
-git fetch origin command
-git checkout -b {branch-name} origin/command
+git checkout -b {branch-name} --no-track main
 ```
 
-If branch exists, checkout existing.
-If origin/branch does not exist, check if local has been pushed yet.
+**IF** on `command` branch:
+
+```bash
+git checkout -b {branch-name} --no-track command
+```
+
+**IF** on other branch, confirm switch to `main` or `command` first.
+
+Proceed to Step 6 after branch created.
 
 ### Step 6: Update CLAUDE.md
 
-dev/workspace/CLAUDE.md
+Edit `dev/workspace/CLAUDE.md`:
 
 1. Edit only these placeholders:
-    - `{branch-name}` → actual branch name
-    - `{YYYY-MM-DD}` → current date
+    - `**/**` → actual branch name
+    - `yyyy-mm-dd` → current date
     - `## Purpose` → expanded user description
     - `# Workspace` → `# [Type] Title Case Description`
 2. Preserve all checkboxes and configuration
@@ -85,7 +134,8 @@ dev/workspace/CLAUDE.md
 ```
 ✓ Branch: {branch-name}
 ✓ Workspace: dev/workspace/CLAUDE.md
-✓ Command paused for you to make changes. Can I commit the workspace now?
+
+Paused for you to make changes. Can I commit the workspace now?
 ```
 
 Wait for user confirmation, then proceed to Step 8.
@@ -93,13 +143,14 @@ Wait for user confirmation, then proceed to Step 8.
 ### Step 8: Commit Workspace
 
 ```bash
-git add -A
+git add dev/workspace/
 git commit -m "Initialize workspace"
 ```
 
 ## Safety
 
 - ⚠️ Stop on uncommitted changes
-- ⚠️ Confirm on non-main branch switch
-- ✓ Always create from origin/main
-- ✓ Auto-commit workspace setup
+- ⚠️ Confirm before switching branches
+- ✓ Prefer user-run script for check gates
+- ✓ Always create with --no-track
+- ✓ Confirm before committing
