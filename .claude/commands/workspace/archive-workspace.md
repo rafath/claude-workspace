@@ -2,6 +2,7 @@
 name: archive-workspace
 description: Creates or updates a workspace directory snapshot.
 allowed-tools: bash()
+note: Prefer to use the run script 'archive-workspace'
 ---
 
 ## Pre-loaded Context

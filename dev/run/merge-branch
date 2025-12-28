@@ -31,20 +31,25 @@ STRATEGY_NAME="merge"
 
 if grep -q "\- \[x\] Squash merge" "$WORKSPACE_FILE"; then
     MERGE_FLAG="--squash"
-    STRATEGY_NAME="squash merge"
+    STRATEGY_NAME="squash"
 elif grep -q "\- \[x\] Rebase merge" "$WORKSPACE_FILE"; then
     MERGE_FLAG="--rebase"
-    STRATEGY_NAME="rebase merge"
+    STRATEGY_NAME="rebase"
 fi
 
 # Allow command line override
-if [[ "$1" == "--squash" ]]; then
-    MERGE_FLAG="--squash"
-    STRATEGY_NAME="squash merge"
-elif [[ "$1" == "--rebase" ]]; then
-    MERGE_FLAG="--rebase"
-    STRATEGY_NAME="rebase merge"
-fi
+for arg in "$@"; do
+    case $arg in
+        --squash)
+            MERGE_FLAG="--squash"
+            STRATEGY_NAME="squash"
+            ;;
+        --rebase)
+            MERGE_FLAG="--rebase"
+            STRATEGY_NAME="rebase"
+            ;;
+    esac
+done
 
 # Step 4: Get current branch and validate
 CURRENT_BRANCH=$(git branch --show-current)
@@ -68,21 +73,12 @@ if [[ -n $(git status --porcelain) ]]; then
 fi
 echo "✓ Working tree is clean"
 
-# Step 6: Check for PR
-PR_NUMBER=$(gh pr view --json number -q '.number' 2>/dev/null)
-if [[ -z "$PR_NUMBER" ]]; then
-    echo "❌ No PR exists for this branch"
-    echo "   Create one with: gh pr create"
-    exit 1
-fi
-echo "✓ PR #$PR_NUMBER exists"
-
-# Step 7: Fetch and check for merge conflicts
+# Step 6: Fetch and check for merge conflicts
 echo ""
 echo "🔄 Fetching $REMOTE..."
 git fetch "$REMOTE" "$PARENT_BRANCH" >/dev/null 2>&1
 
-MERGE_BASE=$(git merge-base HEAD "$REMOTE/$PARENT_BRANCH" 2>/dev/null)
+MERGE_BASE=$(git merge-base HEAD "$REMOTE/$PARENT_BRANCH" 2>/dev/null || true)
 if [[ -n "$MERGE_BASE" ]]; then
     CONFLICTS=$(git merge-tree "$MERGE_BASE" HEAD "$REMOTE/$PARENT_BRANCH" 2>/dev/null | grep -c "^<<<<<<<" || true)
     if [[ "$CONFLICTS" -gt 0 ]]; then
@@ -94,52 +90,111 @@ fi
 echo "✓ No merge conflicts"
 echo ""
 
-# Introduce a check gate.
-read -p "Branch ready. Push to $REMOTE and $STRATEGY_NAME? [y/N] " -n 1 -r
-echo
-[[ $REPLY =~ ^[Yy]$ ]] || { echo "Merge aborted."; exit 0; }
+# ==============================================================================
+# Merge functions
+# ==============================================================================
 
+do_local_merge() {
+    # Push branch first
+    echo "🔄 Pushing to $REMOTE..."
+    git push "$REMOTE" "$CURRENT_BRANCH"
+    echo "✓ Pushed to $REMOTE/$CURRENT_BRANCH"
+    echo ""
 
-# Step 8: Push to remote
-echo ""
-echo "🔄 Pushing to $REMOTE..."
-git push "$REMOTE" "$CURRENT_BRANCH"
-echo "✓ Pushed to $REMOTE/$CURRENT_BRANCH"
+    # Merge to parent branch
+    echo "🔄 Merging to $PARENT_BRANCH..."
 
-# Step 9: Merge to parent branch
-echo ""
-echo "🔄 Merging to $PARENT_BRANCH..."
+    if [[ "$MERGE_FLAG" == "--rebase" ]]; then
+        git pull "$REMOTE" "$PARENT_BRANCH" --rebase=false
+        git rebase "$REMOTE/$PARENT_BRANCH"
+        git checkout "$PARENT_BRANCH"
+        git merge --ff-only "$CURRENT_BRANCH"
+    else
+        git checkout "$PARENT_BRANCH"
+        git pull "$REMOTE" "$PARENT_BRANCH"
 
-if [[ "$MERGE_FLAG" == "--rebase" ]]; then
-    # Rebase: replay commits onto parent, then fast-forward
-    git pull "$REMOTE" "$PARENT_BRANCH" --rebase=false
-    git rebase "$REMOTE/$PARENT_BRANCH"
-    git checkout "$PARENT_BRANCH"
-    git merge --ff-only "$CURRENT_BRANCH"
-else
+        if [[ "$MERGE_FLAG" == "--squash" ]]; then
+            git merge --squash "$CURRENT_BRANCH"
+            git commit -m "🔀 merge: $CURRENT_BRANCH (squash)"
+        else
+            git merge "$CURRENT_BRANCH" -m "🔀 merge: $CURRENT_BRANCH"
+        fi
+    fi
+
+    echo "✓ Merged $CURRENT_BRANCH to $PARENT_BRANCH"
+
+    # Push parent branch
+    echo ""
+    echo "🔄 Pushing $PARENT_BRANCH..."
+    git push "$REMOTE" "$PARENT_BRANCH"
+    echo "✓ Pushed $PARENT_BRANCH to $REMOTE"
+
+    echo ""
+    echo "═══════════════════════════════════════"
+    echo "  ✓ Local merge complete!"
+    echo "═══════════════════════════════════════"
+    echo ""
+    echo "To delete the branch: git branch -d $CURRENT_BRANCH"
+}
+
+do_github_merge() {
+    local pr_number=$1
+
+    # Push any unpushed commits first
+    echo "🔄 Pushing to $REMOTE..."
+    git push "$REMOTE" "$CURRENT_BRANCH"
+    echo "✓ Pushed to $REMOTE/$CURRENT_BRANCH"
+    echo ""
+
+    # Build gh pr merge flags
+    local gh_flags=""
+    case "$MERGE_FLAG" in
+        --squash) gh_flags="--squash" ;;
+        --rebase) gh_flags="--rebase" ;;
+        *)        gh_flags="--merge" ;;
+    esac
+
+    echo "🔄 Merging PR #$pr_number via GitHub..."
+    gh pr merge "$pr_number" $gh_flags
+
+    echo "✓ PR #$pr_number merged"
+
+    # Update local main
+    echo ""
+    echo "🔄 Updating local $PARENT_BRANCH..."
     git checkout "$PARENT_BRANCH"
     git pull "$REMOTE" "$PARENT_BRANCH"
+    echo "✓ Local $PARENT_BRANCH updated"
 
-    if [[ "$MERGE_FLAG" == "--squash" ]]; then
-        git merge --squash "$CURRENT_BRANCH"
-        git commit -m "🔀 merge: $CURRENT_BRANCH (squash)"
-    else
-        git merge "$CURRENT_BRANCH" -m "🔀 merge: $CURRENT_BRANCH"
-    fi
+    echo ""
+    echo "═══════════════════════════════════════"
+    echo "  ✓ GitHub merge complete!"
+    echo "═══════════════════════════════════════"
+    echo ""
+    echo "PR #$pr_number merged via GitHub"
+    echo "To delete the branch: git branch -d $CURRENT_BRANCH && git push $REMOTE --delete $CURRENT_BRANCH"
+}
+
+# ==============================================================================
+# Step 7: Check for PR and decide merge path
+# ==============================================================================
+
+PR_NUMBER=$(gh pr view --json number -q '.number' 2>/dev/null || true)
+
+if [[ -n "$PR_NUMBER" ]]; then
+    echo "✓ PR #$PR_NUMBER exists"
+    echo ""
+    read -p "Merge PR #$PR_NUMBER via GitHub? [y/N] " -n 1 -r
+    echo
+    [[ $REPLY =~ ^[Yy]$ ]] || { echo "Merge aborted."; exit 0; }
+    echo ""
+    do_github_merge "$PR_NUMBER"
+else
+    echo "⚠️  No PR exists for this branch"
+    echo ""
+    read -p "Merge locally without PR? [y/N] " -n 1 -r
+    echo
+    [[ $REPLY =~ ^[Yy]$ ]] || { echo "Merge aborted. Create PR with: gh pr create"; exit 0; }
+    echo ""
+    do_local_merge
 fi
-
-echo "✓ Merged $CURRENT_BRANCH to $PARENT_BRANCH"
-
-# Step 10: Push parent branch
-echo ""
-echo "🔄 Pushing $PARENT_BRANCH..."
-git push "$REMOTE" "$PARENT_BRANCH"
-echo "✓ Pushed $PARENT_BRANCH to $REMOTE"
-
-echo ""
-echo "═══════════════════════════════════════"
-echo "  ✓ Merge complete!"
-echo "═══════════════════════════════════════"
-echo ""
-echo "PR #$PR_NUMBER can now be closed"
-echo "To delete the branch: git branch -d $CURRENT_BRANCH"

@@ -14,7 +14,7 @@ echo "Workspace merge protection initialised."
 
 # Locally ignore these locations in Git.
 mkdir -p .git/info && touch .git/info/exclude
-for p in "/dev/workspace/context/tree.md" "/dev/project/" "/dev/run/" "/.claude/*" "!/.claude/config/"; do
+for p in "/dev/workspace/context/tree.md" "/dev/project/" "/dev/run/" "/.claude/*" "!/.claude/config/" "!/.claude/rules/"; do
 grep -qxF "$p" .git/info/exclude || echo "$p" >> .git/info/exclude
 done
 echo "Local files ignored by Git"

@@ -2,6 +2,7 @@
 name: merge-branch
 description: Execute PR merge after preflight validation
 allowed-tools: bash(), Task(), Read()
+note: Prefer to use the run script 'merge-branch'
 ---
 
 ## Pre-loaded Context

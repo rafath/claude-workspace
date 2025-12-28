@@ -52,7 +52,7 @@ Sanitization:
 Check current branch and script availability:
 
 **Path 1 - Script available + on parent branch:**
-If `dev/run/new-branch` exists AND on `main` or `command` branch, go to Step 5a.
+If `dev/run/new-workspace` exists AND on `main` or `command` branch, go to Step 5a.
 
 **Path 2 - Already on similar feature branch:**
 If current branch name closely matches the intended purpose (e.g., user wants "add login feature" and already on `feature/add-login`), go to Step 5b.

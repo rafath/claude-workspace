@@ -2,6 +2,7 @@
 name: sync-workspace
 description: Pulls in changes to the workspace from upstream.
 allowed-tools: bash()
+note: Prefer to use the run script 'sync-workspace'
 ---
 
 ## Pre-loaded Context

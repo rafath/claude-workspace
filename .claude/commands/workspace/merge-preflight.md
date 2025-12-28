@@ -2,6 +2,7 @@
 name: merge-preflight
 description: Validate branch readiness for merge with comprehensive report
 allowed-tools: bash(), Task(), Read(), Write()
+note: Prefer to use the run script 'merge-preflight'
 ---
 
 ## Pre-loaded Context
