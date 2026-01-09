@@ -119,23 +119,22 @@ fi
 if [[ "$ARCHIVE_WORKSPACE" == true ]]; then
     ARCHIVE_BASE="dev/branches"
 
-    # Parse branch to get archive suffix (borrowed from archive-workspace)
+    # Parse branch to get archive name (matches archive-workspace naming)
     if [[ "$CURRENT_BRANCH" =~ ^(([^/]+)/)?(.+)$ ]]; then
         BRANCH_TYPE="${BASH_REMATCH[2]}"
         BRANCH_DESC="${BASH_REMATCH[3]}"
 
         if [[ -n "$BRANCH_TYPE" ]]; then
-            FIND_SUFFIX="_\[${BRANCH_TYPE}\]_${BRANCH_DESC}"
+            ARCHIVE_NAME="${BRANCH_TYPE}_${BRANCH_DESC}"
         else
-            FIND_SUFFIX="_${BRANCH_DESC}"
+            ARCHIVE_NAME="${BRANCH_DESC}"
         fi
 
-        # Find archive for this branch (any date)
-        EXISTING_ARCHIVE=$(find "$ARCHIVE_BASE" -maxdepth 1 -type d -name "*${FIND_SUFFIX}" 2>/dev/null | head -1)
+        ARCHIVE_PATH="${ARCHIVE_BASE}/${ARCHIVE_NAME}"
 
-        if [[ -n "$EXISTING_ARCHIVE" ]]; then
+        if [[ -d "$ARCHIVE_PATH" ]]; then
             # macOS only: stat -f for format, -t for time format
-            LAST_MODIFIED=$(stat -f "%Sm" -t "%Y-%m-%d %H:%M" "$EXISTING_ARCHIVE")
+            LAST_MODIFIED=$(stat -f "%Sm" -t "%Y-%m-%d %H:%M" "$ARCHIVE_PATH")
             add_passed "Workspace archived (last updated: $LAST_MODIFIED)"
         else
             add_warning "Archive required but none found (run: dev/run/archive-workspace)"
