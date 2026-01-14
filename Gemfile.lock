@@ -9,7 +9,7 @@ PLATFORMS
   ruby
 
 DEPENDENCIES
-  claude_hooks (~> 1.0)
+  claude_hooks
 
 BUNDLED WITH
    2.7.2

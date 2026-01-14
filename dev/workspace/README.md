@@ -17,7 +17,7 @@ gem install claude_hooks
 
 1. Copy the `dev/workspace/` template to a main or "parent" branch of your repository
 2. Overwrite `.claude/` directory in your main or "parent" branch
-3. If using Rails, place `gem "claude_hooks", "~> 1.0"` in a Gemfile in the root of your project and run `bundle install`
+3. If using Rails, place `gem "claude_hooks"` in a Gemfile in the root of your project and run `bundle install`
 4. run `chmod +x ./dev/run/setup-workspace && ./dev/run/setup-workspace` to initialise the setup script. This is a one-time setup only, can delete the file afterwards. Sets up a 'workspace' remote and merge protection rules for .gitattributes
 
 If this causes conflicts, copy sections manually.

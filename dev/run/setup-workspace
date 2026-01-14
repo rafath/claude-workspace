@@ -26,6 +26,14 @@ for p in "dev/workspace/** merge=protect" ".claude/config/** merge=ours" "README
 done
 echo "Merge strategies set"
 
+# Exclude dev workspace from Docker builds (if .dockerignore exists)
+if [ -f .dockerignore ]; then
+    grep -qxF "/dev/" .dockerignore || echo "/dev/" >> .dockerignore
+    echo "Dev workspace excluded from Docker builds"
+else
+    echo "No .dockerignore found (skipped)"
+fi
+
 # Remote workspace repository (add or update). Pull workspace updates from the `workspace` origin.
 git remote add workspace https://github.com/dilberryhoundog/dev-workspace.git 2>/dev/null || git remote set-url workspace https://github.com/dilberryhoundog/dev-workspace.git
 echo "Workspace remote repository added"
