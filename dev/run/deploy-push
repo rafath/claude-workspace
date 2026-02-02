@@ -1,0 +1,170 @@
+#!/bin/bash
+
+### Pushes command branch to deploy repo with workspace/dev files stripped.
+# Creates temp branch, removes configured directories, pushes to deploy:staging.
+# Usage: dev/run/deploy-push [--dry-run]
+#   --dry-run  Show what would be done without making changes
+
+set -e
+
+# ==============================================================================
+# CONFIGURATION - Edit these arrays to change what gets stripped
+# ==============================================================================
+
+# Directories to remove before pushing to deploy
+# Add paths relative to repo root, one per line
+STRIP_DIRS=(
+    "dev/branches"
+)
+
+# Remote and branch configuration
+DEPLOY_REMOTE="deploy"
+DEPLOY_BRANCH="command-mirror"
+SOURCE_BRANCH="command"
+TEMP_BRANCH="deploy-push-temp"
+
+# ==============================================================================
+# SCRIPT START
+# ==============================================================================
+
+DRY_RUN=false
+for arg in "$@"; do
+    case $arg in
+        --dry-run)
+            DRY_RUN=true
+            ;;
+    esac
+done
+
+echo "🚀 Deploy Push"
+echo "   Source:      $SOURCE_BRANCH"
+echo "   Deploy to:   $DEPLOY_REMOTE/$DEPLOY_BRANCH"
+echo "   Temp branch: $TEMP_BRANCH"
+if [[ "$DRY_RUN" == true ]]; then
+    echo "   Mode:        DRY RUN (no changes)"
+fi
+echo ""
+
+# Step 1: Verify deploy remote exists
+if ! git remote get-url "$DEPLOY_REMOTE" >/dev/null 2>&1; then
+    echo "❌ Remote '$DEPLOY_REMOTE' not found"
+    echo ""
+    echo "   Add it with:"
+    echo "   git remote add $DEPLOY_REMOTE git@github.com:dilberryhoundog/bizzy.git"
+    exit 1
+fi
+DEPLOY_URL=$(git remote get-url "$DEPLOY_REMOTE")
+echo "✓ Deploy remote: $DEPLOY_URL"
+
+# Step 2: Verify source branch exists
+if ! git rev-parse --verify "$SOURCE_BRANCH" >/dev/null 2>&1; then
+    echo "❌ Source branch '$SOURCE_BRANCH' not found"
+    exit 1
+fi
+echo "✓ Source branch exists: $SOURCE_BRANCH"
+
+# Step 3: Working tree must be clean
+if [[ -n $(git status --porcelain) ]]; then
+    echo "❌ Working tree is not clean"
+    echo "   Commit or stash changes before deploying"
+    echo ""
+    git status --short
+    exit 1
+fi
+echo "✓ Working tree is clean"
+
+# Step 4: Show configured directories (informational)
+echo ""
+echo "📋 Directories configured to strip:"
+for dir in "${STRIP_DIRS[@]}"; do
+    if [[ -d "$dir" ]]; then
+        echo "   ✓ $dir"
+    else
+        echo "   - $dir (not present)"
+    fi
+done
+
+# Step 5: Show commit info
+echo ""
+echo "📊 Source commit:"
+git log -1 --oneline "$SOURCE_BRANCH"
+
+# Dry run exits here
+if [[ "$DRY_RUN" == true ]]; then
+    echo ""
+    echo "═══════════════════════════════════════"
+    echo "  DRY RUN - No changes made"
+    echo "═══════════════════════════════════════"
+    exit 0
+fi
+
+# Step 6: Confirm
+echo ""
+read -p "Push to $DEPLOY_REMOTE/$DEPLOY_BRANCH? [y/N] " -n 1 -r
+echo
+[[ $REPLY =~ ^[Yy]$ ]] || { echo "Deploy aborted."; exit 0; }
+
+# Step 7: Remember current branch to return to
+ORIGINAL_BRANCH=$(git branch --show-current)
+CLEANUP_NEEDED=false
+
+cleanup() {
+    if [[ "$CLEANUP_NEEDED" == true ]]; then
+        echo ""
+        echo "🧹 Cleaning up..."
+        git checkout "$ORIGINAL_BRANCH" 2>/dev/null || true
+        # Restore original branch to clean state (undo any carried-over deletions)
+        git restore --staged --worktree . 2>/dev/null || true
+        git branch -D "$TEMP_BRANCH" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+# Step 8: Create temp branch from source
+echo ""
+echo "🔄 Creating temp branch from $SOURCE_BRANCH..."
+git checkout -B "$TEMP_BRANCH" "$SOURCE_BRANCH"
+CLEANUP_NEEDED=true
+
+# Verify we're on the correct branch before proceeding
+CURRENT=$(git branch --show-current)
+if [[ "$CURRENT" != "$TEMP_BRANCH" ]]; then
+    echo "❌ Failed to switch to temp branch (on $CURRENT)"
+    exit 1
+fi
+echo "✓ Created $TEMP_BRANCH"
+
+# Step 9: Remove configured directories
+echo ""
+echo "🗑️  Removing directories..."
+for dir in "${STRIP_DIRS[@]}"; do
+    git rm -rf --ignore-unmatch "$dir" 2>/dev/null
+done
+
+# Step 10: Commit if there are staged changes
+echo ""
+if git diff --cached --quiet; then
+    echo "📝 No tracked files to remove - pushing as-is"
+else
+    echo "📝 Committing removal..."
+    git commit -m "🚀 deploy: strip workspace directories for deploy"
+    echo "✓ Changes committed"
+fi
+
+# Step 11: Push to deploy remote
+echo ""
+echo "🔄 Pushing to $DEPLOY_REMOTE/$DEPLOY_BRANCH..."
+git push "$DEPLOY_REMOTE" "$TEMP_BRANCH:$DEPLOY_BRANCH" --force
+echo "✓ Pushed to $DEPLOY_REMOTE/$DEPLOY_BRANCH"
+
+# Step 12: Cleanup happens via trap, show success
+CLEANUP_NEEDED=true  # Ensure cleanup runs
+
+echo ""
+echo "═══════════════════════════════════════"
+echo "  ✓ Deploy push complete!"
+echo "═══════════════════════════════════════"
+echo ""
+echo "Next steps:"
+echo "  1. In bizzy: dev/run/merge-staging"
+echo "  2. Review and deploy: dev/run/deploy-staging"
