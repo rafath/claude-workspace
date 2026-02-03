@@ -94,6 +94,18 @@ echo ""
 # Merge functions
 # ==============================================================================
 
+# After a --no-commit merge, unstage workspace files so the parent branch's
+# version is kept and new files from the feature branch are discarded.
+restore_workspace() {
+    if git diff --cached --name-only | grep -q "^dev/workspace/"; then
+        echo "🧹 Restoring workspace files..."
+        git reset HEAD -- dev/workspace/ >/dev/null 2>&1 || true
+        git checkout -- dev/workspace/ >/dev/null 2>&1 || true
+        git clean -fd -- dev/workspace/ >/dev/null 2>&1 || true
+        echo "✓ Workspace files preserved"
+    fi
+}
+
 do_local_merge() {
     # Push branch first
     echo "🔄 Pushing to $REMOTE..."
@@ -115,9 +127,12 @@ do_local_merge() {
 
         if [[ "$MERGE_FLAG" == "--squash" ]]; then
             git merge --squash "$CURRENT_BRANCH"
+            restore_workspace
             git commit -m "🔀 merge: $CURRENT_BRANCH (squash)"
         else
-            git merge "$CURRENT_BRANCH" -m "🔀 merge: $CURRENT_BRANCH"
+            git merge --no-ff --no-commit "$CURRENT_BRANCH"
+            restore_workspace
+            git commit -m "🔀 merge: $CURRENT_BRANCH"
         fi
     fi
 

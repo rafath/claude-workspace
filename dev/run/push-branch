@@ -24,7 +24,7 @@ PARENT_BRANCH="${PARENT_BRANCH:-main}"
 CURRENT_BRANCH=$(git branch --show-current)
 
 # Step 3: Safety check - prevent pushing to protected branches
-PROTECTED_BRANCHES="main master command $PARENT_BRANCH"
+PROTECTED_BRANCHES="main master"
 for branch in $PROTECTED_BRANCHES; do
     if [[ "$CURRENT_BRANCH" == "$branch" ]]; then
         echo "❌ Cannot push directly to $CURRENT_BRANCH"

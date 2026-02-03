@@ -21,7 +21,7 @@ echo "Local files ignored by Git"
 
 # Add these attributes to .gitattributes
 touch .gitattributes
-for p in "dev/workspace/** merge=protect" ".claude/config/** merge=ours" "README.md merge=ours"; do
+for p in "dev/workspace/** merge=protect" ".claude/config/** merge=protect" "README.md merge=protect"; do
     grep -qxF "$p" .gitattributes || echo "$p" >>.gitattributes
 done
 echo "Merge strategies set"
