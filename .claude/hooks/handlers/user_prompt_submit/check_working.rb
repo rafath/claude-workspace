@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# require 'claude_hooks' - loaded by entrypoint
+### Check Working - Claude reviews its completed work for flaws and improvements.
 
 class CheckWorking < ClaudeHooks::UserPromptSubmit
   def call

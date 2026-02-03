@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# require 'claude_hooks' - loaded by entrypoint
+### Show Working - Claude reveals its intentions and implementation plan.
 
 class ShowWorking < ClaudeHooks::UserPromptSubmit
   def call

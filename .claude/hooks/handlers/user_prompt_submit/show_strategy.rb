@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# require 'claude_hooks' - loaded by entrypoint
+### Show Strategy - Claude explains the process it will follow to complete the task.
 
 class ShowStrategy < ClaudeHooks::UserPromptSubmit
   def call

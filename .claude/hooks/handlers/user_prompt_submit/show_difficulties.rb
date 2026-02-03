@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# require 'claude_hooks' - loaded by entrypoint
+### Show Difficulties - Claude analyzes the conversation for communication issues.
 
 class ShowDifficulties < ClaudeHooks::UserPromptSubmit
   def call

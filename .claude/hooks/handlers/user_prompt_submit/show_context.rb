@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# require 'claude_hooks' - loaded by entrypoint
+### Show Context - Claude reveals what files, docs, and knowledge it needs.
 
 class ShowContext < ClaudeHooks::UserPromptSubmit
   def call

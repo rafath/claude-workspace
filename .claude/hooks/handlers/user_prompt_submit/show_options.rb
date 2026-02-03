@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# require 'claude_hooks' - loaded by entrypoint
+### Show Options - Claude presents multiple solution approaches for comparison.
 
 class ShowOptions < ClaudeHooks::UserPromptSubmit
   def call

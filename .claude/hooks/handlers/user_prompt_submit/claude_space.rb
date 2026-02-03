@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# require 'claude_hooks' - loaded by entrypoint
+### Claude Space - Claude takes a private thinking break to reflect on the session.
 
 class ClaudeSpace < ClaudeHooks::UserPromptSubmit
   def call
