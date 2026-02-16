@@ -1,3 +1,0 @@
-# Keep .claude ignored (from global gitignore) except skills
-/.claude/*
-!/.claude/skills/
