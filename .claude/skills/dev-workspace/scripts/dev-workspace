@@ -1694,7 +1694,7 @@ cmd_rebuild() {
     git checkout "$PARENT_BRANCH"
 
     echo "🔄 Pulling workspace updates..."
-    git pull workspace main --no-edit --allow-unrelated-histories
+    git pull workspace main --no-rebase --no-edit --allow-unrelated-histories
 
     echo "✓ Workspace updated on $PARENT_BRANCH"
 

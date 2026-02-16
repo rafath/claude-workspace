@@ -1,0 +1,1074 @@
+#!/bin/bash
+# dev-deploy — Deployment pipeline automation
+# Part of the dev-deploy skill for OpenClaw / Claude Code
+#
+# Usage: dev-deploy <command> [flags]
+# Config: dev/deploy/deploy-config.yml
+
+set -e
+
+CONFIG_FILE="dev/deploy/deploy-config.yml"
+
+# Resolve skill directory (where templates live)
+resolve_skill_dir() {
+    local script_path="${BASH_SOURCE[0]}"
+    while [[ -L "$script_path" ]]; do
+        local link_target
+        link_target=$(readlink "$script_path")
+        if [[ "$link_target" == /* ]]; then
+            script_path="$link_target"
+        else
+            script_path="$(dirname "$script_path")/$link_target"
+        fi
+    done
+    local scripts_dir
+    scripts_dir=$(cd "$(dirname "$script_path")" && pwd)
+    echo "$(dirname "$scripts_dir")"
+}
+
+SKILL_DIR=$(resolve_skill_dir)
+
+# ==============================================================================
+# YAML PARSER (minimal, no dependencies)
+# ==============================================================================
+# Walks dotted key paths of any depth. Handles simple values and arrays.
+
+yaml_get() {
+    local file="$1"
+    local dotted_key="$2"
+
+    # Split dotted key into array
+    IFS='.' read -ra key_parts <<< "$dotted_key"
+
+    local current_indent=0
+    local match_depth=0
+    local total_depth=${#key_parts[@]}
+
+    while IFS= read -r line; do
+        # Skip comments and blank lines
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+
+        # Count leading spaces
+        local stripped="${line#"${line%%[![:space:]]*}"}"
+        local indent=$(( ${#line} - ${#stripped} ))
+
+        # If indent decreased below our match depth, key path is broken
+        if [[ $match_depth -gt 0 && $indent -le $((current_indent - 2)) ]]; then
+            # Reset match if we've backed out
+            local expected_indent=$(( match_depth * 2 ))
+            if [[ $indent -lt $expected_indent ]]; then
+                match_depth=0
+                current_indent=0
+            fi
+        fi
+
+        # What key are we looking for at current depth?
+        local target_key="${key_parts[$match_depth]}"
+        local expected_indent=$(( match_depth * 2 ))
+
+        # Check if this line matches the next key in our path
+        if [[ $indent -eq $expected_indent ]] && [[ "$stripped" =~ ^${target_key}:[[:space:]]*(.*) ]]; then
+            local value="${BASH_REMATCH[1]}"
+            match_depth=$((match_depth + 1))
+            current_indent=$((indent + 2))
+
+            # If we've matched all keys, return the value
+            if [[ $match_depth -eq $total_depth ]]; then
+                # Strip inline comments
+                value=$(echo "$value" | sed 's/[[:space:]]*#.*//')
+                # Strip surrounding quotes
+                value=$(echo "$value" | sed "s/^['\"]//; s/['\"]$//")
+                echo "$value"
+                return 0
+            fi
+        fi
+    done < "$file"
+
+    return 1
+}
+
+yaml_section_exists() {
+    local file="$1"
+    local dotted_key="$2"
+
+    # Check if the key exists AND is not commented out
+    IFS='.' read -ra key_parts <<< "$dotted_key"
+    local match_depth=0
+    local total_depth=${#key_parts[@]}
+
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+
+        local stripped="${line#"${line%%[![:space:]]*}"}"
+        local indent=$(( ${#line} - ${#stripped} ))
+        local target_key="${key_parts[$match_depth]}"
+        local expected_indent=$(( match_depth * 2 ))
+
+        if [[ $indent -lt $expected_indent && $match_depth -gt 0 ]]; then
+            match_depth=0
+        fi
+
+        if [[ $indent -eq $expected_indent ]] && [[ "$stripped" =~ ^${target_key}: ]]; then
+            match_depth=$((match_depth + 1))
+            if [[ $match_depth -eq $total_depth ]]; then
+                return 0
+            fi
+        fi
+    done < "$file"
+
+    return 1
+}
+
+# ==============================================================================
+# CONFIG LOADING
+# ==============================================================================
+
+CONFIG=""
+PROJECT_ROOT=""
+
+find_project_root() {
+    local dir="$PWD"
+    while [[ "$dir" != "/" ]]; do
+        if [[ -f "$dir/$CONFIG_FILE" ]]; then
+            echo "$dir"
+            return 0
+        fi
+        dir=$(dirname "$dir")
+    done
+    return 1
+}
+
+load_config() {
+    PROJECT_ROOT=$(find_project_root) || {
+        echo "❌ No deploy-config.yml found"
+        echo "   Expected at: $CONFIG_FILE"
+        echo "   Run: dev-deploy init"
+        exit 1
+    }
+    CONFIG="$PROJECT_ROOT/$CONFIG_FILE"
+
+    # Load source config
+    SOURCE_BRANCH=$(yaml_get "$CONFIG" "source.branch") || SOURCE_BRANCH=""
+    SOURCE_REMOTE_NAME=$(yaml_get "$CONFIG" "source.remote.name") || SOURCE_REMOTE_NAME=""
+    SOURCE_REMOTE_BRANCH=$(yaml_get "$CONFIG" "source.remote.branch") || SOURCE_REMOTE_BRANCH=""
+
+    # Load staging config
+    STAGING_BRANCH=$(yaml_get "$CONFIG" "staging.branch") || STAGING_BRANCH=""
+    STAGING_KAMAL_DEST=$(yaml_get "$CONFIG" "staging.kamal_destination") || STAGING_KAMAL_DEST=""
+    STAGING_URL=$(yaml_get "$CONFIG" "staging.url") || STAGING_URL=""
+    STAGING_MERGE_STRATEGY=$(yaml_get "$CONFIG" "staging.merge_strategy") || STAGING_MERGE_STRATEGY="--no-edit"
+
+    # Load production config
+    PROD_BRANCH=$(yaml_get "$CONFIG" "production.branch") || PROD_BRANCH=""
+    PROD_URL=$(yaml_get "$CONFIG" "production.url") || PROD_URL=""
+    PROD_PROMOTE_FROM=$(yaml_get "$CONFIG" "production.promote_from") || PROD_PROMOTE_FROM=""
+    PROD_MERGE_STRATEGY=$(yaml_get "$CONFIG" "production.merge_strategy") || PROD_MERGE_STRATEGY="--no-edit"
+    PROD_KAMAL_DEST=$(yaml_get "$CONFIG" "production.kamal_destination") || PROD_KAMAL_DEST=""
+
+    # Load server config
+    SERVER_HOST=$(yaml_get "$CONFIG" "server.host") || SERVER_HOST=""
+    SERVER_PORT=$(yaml_get "$CONFIG" "server.port") || SERVER_PORT="22"
+
+    # Load hooks
+    HOOK_BACKUP_DB=$(yaml_get "$CONFIG" "hooks.backup_db") || HOOK_BACKUP_DB=""
+    HOOK_REFRESH_DB=$(yaml_get "$CONFIG" "hooks.refresh_db") || HOOK_REFRESH_DB=""
+    HOOK_PRE_DEPLOY=$(yaml_get "$CONFIG" "hooks.pre_deploy") || HOOK_PRE_DEPLOY=""
+    HOOK_POST_DEPLOY=$(yaml_get "$CONFIG" "hooks.post_deploy") || HOOK_POST_DEPLOY=""
+    HOOK_HEALTH=$(yaml_get "$CONFIG" "hooks.health") || HOOK_HEALTH=""
+}
+
+# ==============================================================================
+# HOOK RUNNER
+# ==============================================================================
+
+run_hook() {
+    local hook_name="$1"
+    local hook_path="$2"
+    local deploy_env="${3:-}"
+
+    if [[ -z "$hook_path" ]]; then
+        return 0
+    fi
+
+    local full_path="$PROJECT_ROOT/$hook_path"
+    if [[ ! -f "$full_path" ]]; then
+        echo "⚠ Hook not found: $hook_path"
+        echo "  Skipping $hook_name"
+        return 1
+    fi
+
+    if [[ ! -x "$full_path" ]]; then
+        chmod +x "$full_path"
+    fi
+
+    echo ""
+    echo "🪝 Running hook: $hook_name ($hook_path)"
+
+    # Export config as environment variables for hooks
+    DEPLOY_ENV="$deploy_env" \
+    DEPLOY_SERVER_HOST="$SERVER_HOST" \
+    DEPLOY_SERVER_PORT="$SERVER_PORT" \
+    DEPLOY_BRANCH="${STAGING_BRANCH}" \
+    DEPLOY_URL="${STAGING_URL}" \
+    "$full_path"
+}
+
+# ==============================================================================
+# HELP
+# ==============================================================================
+
+cmd_help() {
+    local topic="${1:-}"
+    case "$topic" in
+        init)
+            echo "dev-deploy init — Scaffold deploy config and hooks"
+            echo ""
+            echo "Usage:"
+            echo "  dev-deploy init                Scaffold deploy-config.yml into dev/deploy/"
+            echo "  dev-deploy init --hooks        Also scaffold example hook scripts into dev/deploy/hooks/"
+            echo "  dev-deploy init --check        Verify config is valid (source, staging, production, hooks, Kamal)"
+            echo ""
+            echo "The init process:"
+            echo "  1. Run 'init' to create deploy-config.yml"
+            echo "  2. Edit deploy-config.yml for your project (branches, server, URLs)"
+            echo "  3. Run 'init --hooks' to scaffold example hook scripts (optional)"
+            echo "  4. Edit hooks for your server/database setup"
+            echo "  5. Run 'init --check' to verify everything is wired up"
+            ;;
+        stage)
+            echo "dev-deploy stage — Merge source into staging branch"
+            echo ""
+            echo "Usage:"
+            echo "  dev-deploy stage               Merge source → staging and push to origin"
+            echo "  dev-deploy stage --check        Show merge status without making changes"
+            echo ""
+            echo "Remote pattern (fork repos):"
+            echo "  Fetches source.remote.branch from source.remote.name, then merges into staging."
+            echo "  Use after 'dev-workspace deploy push' has pushed to the mirror branch."
+            echo ""
+            echo "Local pattern (vanilla repos):"
+            echo "  Merges source.branch directly into staging. No remote fetch needed."
+            echo ""
+            echo "Merge strategy is configured in staging.merge_strategy (default: --no-edit)."
+            ;;
+        deploy)
+            echo "dev-deploy deploy — Deploy via Kamal"
+            echo ""
+            echo "Usage:"
+            echo "  dev-deploy deploy staging               Deploy staging environment"
+            echo "  dev-deploy deploy staging --check        Show what would be deployed"
+            echo "  dev-deploy deploy staging --refresh-db   Refresh staging DB before deploying"
+            echo "  dev-deploy deploy production             Promote and deploy production"
+            echo "  dev-deploy deploy production --check     Show production deploy plan"
+            echo ""
+            echo "Staging deploy:"
+            echo "  Switches to staging branch, pulls latest, runs hooks, deploys via Kamal."
+            echo "  --refresh-db runs the refresh_db hook before deploying."
+            echo ""
+            echo "Production deploy:"
+            echo "  1. Pulls promote_from branch (usually staging)"
+            echo "  2. Merges into production branch and pushes"
+            echo "  3. Runs backup_db hook (database backup)"
+            echo "  4. Runs pre_deploy hook"
+            echo "  5. Deploys via Kamal"
+            echo "  6. Runs post_deploy hook"
+            echo "  7. Switches back to promote_from branch"
+            ;;
+        boot)
+            echo "dev-deploy boot — Start application via Kamal"
+            echo ""
+            echo "Usage:"
+            echo "  dev-deploy boot                 Boot production (default)"
+            echo "  dev-deploy boot staging          Boot staging environment"
+            echo "  dev-deploy boot production       Boot production environment"
+            echo ""
+            echo "Runs: kamal app boot [-d <kamal_destination>]"
+            echo "Kamal destination is read from config (staging.kamal_destination or production.kamal_destination)."
+            ;;
+        stop)
+            echo "dev-deploy stop — Stop application via Kamal"
+            echo ""
+            echo "Usage:"
+            echo "  dev-deploy stop                 Stop production (default)"
+            echo "  dev-deploy stop staging          Stop staging environment"
+            echo "  dev-deploy stop production       Stop production environment"
+            echo ""
+            echo "Runs: kamal app stop [-d <kamal_destination>]"
+            echo "Kamal destination is read from config (staging.kamal_destination or production.kamal_destination)."
+            ;;
+        setup)
+            echo "dev-deploy setup — Run setup operations via hooks"
+            echo ""
+            echo "Usage:"
+            echo "  dev-deploy setup --refresh-db   Refresh staging DB from production (runs refresh_db hook)"
+            echo "  dev-deploy setup --check         Show configured hooks and server details"
+            echo ""
+            echo "Hooks receive config as environment variables (DEPLOY_SERVER_HOST, DEPLOY_ENV, etc)."
+            echo "Scaffold example hooks with: dev-deploy init --hooks"
+            echo "Configure hook paths in deploy-config.yml under 'hooks' section."
+            ;;
+        health)
+            echo "dev-deploy health — Health check for apps, branches, and server"
+            echo ""
+            echo "Usage:"
+            echo "  dev-deploy health               Run full health check"
+            echo ""
+            echo "Checks:"
+            echo "  Apps      — Kamal container status for production and staging (up/down + uptime)"
+            echo "  Branches  — Staging sync with origin, source merge status"
+            echo "  Server    — Custom health hook, or basic disk check via SSH"
+            echo ""
+            echo "Custom server checks: configure hooks.health in deploy-config.yml"
+            echo "to point to a project-specific health script."
+            ;;
+        *)
+            echo "dev-deploy v1.0.0 — Deployment pipeline automation"
+            echo ""
+            echo "Usage: dev-deploy <command> [options]"
+            echo "       dev-deploy help <command>  Show command details"
+            echo ""
+            echo "Commands:"
+            echo "  init              Scaffold deploy config and hooks"
+            echo "  stage             Merge source into staging"
+            echo "  deploy            Deploy via Kamal (staging or production)"
+            echo "  boot              Start application via Kamal"
+            echo "  stop              Stop application via Kamal"
+            echo "  setup             Run setup operations (DB refresh etc)"
+            echo "  health            Health check (apps, branches, server)"
+            echo "  help              Show this help"
+            echo ""
+            echo "Global options:"
+            echo "  --check           Inspect state without making changes"
+            echo ""
+            echo "Config: $CONFIG_FILE"
+            echo "Hooks:  dev/deploy/hooks/"
+            echo ""
+            echo "Deploy patterns:"
+            echo "  Remote (fork):  dev-workspace deploy push → dev-deploy stage → dev-deploy deploy"
+            echo "  Local (vanilla): dev-deploy stage → dev-deploy deploy"
+            ;;
+    esac
+}
+
+# ==============================================================================
+# INIT
+# ==============================================================================
+
+cmd_init() {
+    case "${1:-}" in
+        --check)
+            init_check
+            ;;
+        --hooks)
+            init_scaffold
+            init_hooks
+            ;;
+        "")
+            init_scaffold
+            ;;
+        *)
+            cmd_help init
+            ;;
+    esac
+}
+
+init_scaffold() {
+    local project_root="$PWD"
+    local target_dir="$project_root/dev/deploy"
+    local config_target="$target_dir/deploy-config.yml"
+
+    local template_dir="$SKILL_DIR/templates"
+    if [[ ! -f "$template_dir/deploy-config.yml" ]]; then
+        echo "❌ Template not found: $template_dir/deploy-config.yml"
+        echo "   Skill directory: $SKILL_DIR"
+        exit 1
+    fi
+
+    mkdir -p "$target_dir"
+
+    if [[ -f "$config_target" ]]; then
+        echo "ℹ deploy-config.yml already exists at $config_target"
+        echo "  To overwrite, delete it first and re-run init"
+    else
+        cp "$template_dir/deploy-config.yml" "$config_target"
+        echo "✓ Created $config_target"
+    fi
+
+    echo ""
+    echo "═══════════════════════════════════════"
+    echo "  ✓ Config scaffolded"
+    echo "═══════════════════════════════════════"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Edit $config_target for your project"
+    echo "     (set source branch, staging/production branches, server, hooks)"
+    echo "  2. Run: dev-deploy init --hooks   (optional — scaffold example hook scripts)"
+    echo "  3. Run: dev-deploy init --check   (verify config)"
+}
+
+init_hooks() {
+    local project_root="$PWD"
+    local hooks_dir="$project_root/dev/deploy/hooks"
+    local template_dir="$SKILL_DIR/templates/hooks"
+
+    mkdir -p "$hooks_dir"
+
+    local count=0
+    for hook_template in "$template_dir"/*; do
+        [[ -f "$hook_template" ]] || continue
+        local hook_name=$(basename "$hook_template")
+        local hook_target="$hooks_dir/$hook_name"
+
+        if [[ -f "$hook_target" ]]; then
+            echo "ℹ $hook_name already exists"
+        else
+            cp "$hook_template" "$hook_target"
+            chmod +x "$hook_target"
+            echo "✓ Created $hook_target"
+            count=$((count + 1))
+        fi
+    done
+
+    echo ""
+    echo "✓ $count hook template(s) scaffolded in $hooks_dir"
+    echo "  Edit hooks for your project's server and database setup"
+}
+
+init_check() {
+    load_config
+
+    echo "🔍 Checking deploy config..."
+    echo ""
+
+    local issues=0
+
+    # Source
+    if [[ -n "$SOURCE_BRANCH" ]]; then
+        echo "✓ Source branch: $SOURCE_BRANCH"
+        if [[ -n "$SOURCE_REMOTE_NAME" ]]; then
+            echo "  Remote: $SOURCE_REMOTE_NAME/$SOURCE_REMOTE_BRANCH (fork/remote pattern)"
+        else
+            echo "  Pattern: local (direct merge)"
+        fi
+    else
+        echo "⚠ source.branch not set"
+        issues=$((issues + 1))
+    fi
+
+    # Staging
+    if yaml_section_exists "$CONFIG" "staging"; then
+        echo "✓ Staging: $STAGING_BRANCH"
+        [[ -n "$STAGING_KAMAL_DEST" ]] && echo "  Kamal destination: $STAGING_KAMAL_DEST"
+        [[ -n "$STAGING_URL" ]] && echo "  URL: $STAGING_URL"
+    else
+        echo "ℹ Staging: not configured (disabled)"
+    fi
+
+    # Production
+    if yaml_section_exists "$CONFIG" "production"; then
+        echo "✓ Production: $PROD_BRANCH"
+        echo "  Promote from: $PROD_PROMOTE_FROM"
+        [[ -n "$PROD_KAMAL_DEST" ]] && echo "  Kamal destination: $PROD_KAMAL_DEST"
+        [[ -n "$PROD_URL" ]] && echo "  URL: $PROD_URL"
+    else
+        echo "⚠ production section not configured"
+        issues=$((issues + 1))
+    fi
+
+    # Server
+    if [[ -n "$SERVER_HOST" ]]; then
+        echo "✓ Server: $SERVER_HOST:$SERVER_PORT"
+    else
+        echo "ℹ Server: not configured (hooks won't have SSH details)"
+    fi
+
+    # Hooks
+    echo ""
+    echo "Hooks:"
+    for hook_var in HOOK_BACKUP_DB HOOK_REFRESH_DB HOOK_PRE_DEPLOY HOOK_POST_DEPLOY HOOK_HEALTH; do
+        local hook_val="${!hook_var}"
+        local hook_label="${hook_var#HOOK_}"
+        hook_label=$(echo "$hook_label" | tr '[:upper:]' '[:lower:]')
+        if [[ -n "$hook_val" ]]; then
+            if [[ -f "$PROJECT_ROOT/$hook_val" ]]; then
+                echo "  ✓ $hook_label → $hook_val"
+            else
+                echo "  ⚠ $hook_label → $hook_val (file not found)"
+                issues=$((issues + 1))
+            fi
+        else
+            echo "  - $hook_label: not configured"
+        fi
+    done
+
+    # Kamal check
+    echo ""
+    if command -v kamal &>/dev/null; then
+        echo "✓ Kamal found: $(kamal version 2>/dev/null || echo 'installed')"
+    else
+        echo "⚠ Kamal not found on PATH"
+        issues=$((issues + 1))
+    fi
+
+    echo ""
+    if [[ $issues -eq 0 ]]; then
+        echo "═══════════════════════════════════════"
+        echo "  ✓ Config OK"
+        echo "═══════════════════════════════════════"
+    else
+        echo "═══════════════════════════════════════"
+        echo "  ⚠ $issues issue(s) found"
+        echo "═══════════════════════════════════════"
+    fi
+}
+
+# ==============================================================================
+# STAGE
+# ==============================================================================
+
+cmd_stage() {
+    if [[ "${1:-}" == "help" || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        cmd_help stage; return
+    fi
+
+    load_config
+
+    if ! yaml_section_exists "$CONFIG" "staging"; then
+        echo "❌ Staging not configured in deploy-config.yml"
+        exit 1
+    fi
+
+    if [[ -z "$SOURCE_BRANCH" ]]; then
+        echo "❌ source.branch not set in deploy-config.yml"
+        exit 1
+    fi
+
+    local check=false
+    [[ "${1:-}" == "--check" ]] && check=true
+
+    # Determine merge source
+    local merge_from=""
+    local needs_fetch=false
+
+    if [[ -n "$SOURCE_REMOTE_NAME" && -n "$SOURCE_REMOTE_BRANCH" ]]; then
+        # Remote pattern — fetch remote branch first
+        merge_from="$SOURCE_REMOTE_NAME/$SOURCE_REMOTE_BRANCH"
+        needs_fetch=true
+    else
+        # Local pattern — merge directly from source branch
+        merge_from="$SOURCE_BRANCH"
+    fi
+
+    if [[ "$check" == true ]]; then
+        echo "🔍 Stage check"
+        echo ""
+        echo "  Source:  $merge_from"
+        echo "  Target:  $STAGING_BRANCH"
+        echo "  Strategy: $STAGING_MERGE_STRATEGY"
+        echo ""
+
+        # Fetch to get accurate state
+        if [[ "$needs_fetch" == true ]]; then
+            echo "→ Fetching $SOURCE_REMOTE_NAME..."
+            git fetch "$SOURCE_REMOTE_NAME" "$SOURCE_REMOTE_BRANCH" --quiet
+        fi
+        git fetch origin "$STAGING_BRANCH" --quiet 2>/dev/null || true
+
+        # Check how far behind staging is
+        local merge_base
+        merge_base=$(git merge-base "$STAGING_BRANCH" "$merge_from" 2>/dev/null || echo "")
+        if [[ -z "$merge_base" ]]; then
+            echo "⚠ No common ancestor — branches may be unrelated"
+            return
+        fi
+
+        local source_head
+        source_head=$(git rev-parse "$merge_from" 2>/dev/null)
+        local staging_head
+        staging_head=$(git rev-parse "$STAGING_BRANCH" 2>/dev/null)
+
+        if git merge-base --is-ancestor "$source_head" "$staging_head" 2>/dev/null; then
+            echo "✓ Staging is up to date with $merge_from"
+        else
+            local unmerged
+            unmerged=$(git rev-list "$STAGING_BRANCH".."$merge_from" --count 2>/dev/null)
+            echo "→ $unmerged commit(s) to merge from $merge_from"
+            echo ""
+            echo "Recent commits:"
+            git log "$STAGING_BRANCH".."$merge_from" --oneline --max-count=10
+        fi
+        return
+    fi
+
+    # --- Execute stage ---
+
+    echo "🚀 Staging: $merge_from → $STAGING_BRANCH"
+    echo ""
+
+    # Fetch if remote pattern
+    if [[ "$needs_fetch" == true ]]; then
+        echo "→ Fetching $SOURCE_REMOTE_NAME/$SOURCE_REMOTE_BRANCH..."
+        git fetch "$SOURCE_REMOTE_NAME" "$SOURCE_REMOTE_BRANCH"
+    fi
+
+    # Switch to staging
+    echo "→ Switching to $STAGING_BRANCH..."
+    git switch "$STAGING_BRANCH"
+
+    # Pull latest staging
+    echo "→ Pulling latest $STAGING_BRANCH..."
+    git pull origin "$STAGING_BRANCH" --quiet
+
+    # Merge source
+    echo "→ Merging $merge_from into $STAGING_BRANCH..."
+    # shellcheck disable=SC2086
+    git merge "$merge_from" $STAGING_MERGE_STRATEGY
+
+    # Push
+    echo "→ Pushing $STAGING_BRANCH to origin..."
+    git push origin "$STAGING_BRANCH"
+
+    echo ""
+    echo "═══════════════════════════════════════"
+    echo "  ✓ Staged"
+    echo "═══════════════════════════════════════"
+    echo ""
+    echo "Next: dev-deploy deploy staging"
+}
+
+# ==============================================================================
+# DEPLOY
+# ==============================================================================
+
+cmd_deploy() {
+    if [[ "${1:-}" == "help" || "${1:-}" == "--help" || "${1:-}" == "-h" || -z "${1:-}" ]]; then
+        cmd_help deploy; return
+    fi
+
+    local env="$1"
+    shift
+
+    case "$env" in
+        staging)
+            deploy_staging "$@"
+            ;;
+        production)
+            deploy_production "$@"
+            ;;
+        *)
+            echo "❌ Unknown environment: $env"
+            echo "   Usage: dev-deploy deploy [staging|production]"
+            exit 1
+            ;;
+    esac
+}
+
+deploy_staging() {
+    load_config
+
+    if ! yaml_section_exists "$CONFIG" "staging"; then
+        echo "❌ Staging not configured in deploy-config.yml"
+        exit 1
+    fi
+
+    local check=false
+    local refresh_db=false
+    for arg in "$@"; do
+        case "$arg" in
+            --check) check=true ;;
+            --refresh-db) refresh_db=true ;;
+        esac
+    done
+
+    local kamal_dest_flag=""
+    [[ -n "$STAGING_KAMAL_DEST" ]] && kamal_dest_flag="-d $STAGING_KAMAL_DEST"
+
+    if [[ "$check" == true ]]; then
+        echo "🔍 Deploy staging check"
+        echo ""
+        echo "  Branch:      $STAGING_BRANCH"
+        echo "  Kamal:       kamal deploy $kamal_dest_flag"
+        [[ -n "$STAGING_URL" ]] && echo "  URL:         $STAGING_URL"
+        [[ "$refresh_db" == true ]] && echo "  Refresh DB:  yes (hook: ${HOOK_REFRESH_DB:-not configured})"
+        echo ""
+
+        # Show current commit on staging
+        echo "→ Latest on $STAGING_BRANCH:"
+        git log "$STAGING_BRANCH" --oneline --max-count=5
+        return
+    fi
+
+    # --- Execute deploy ---
+
+    echo "🚀 Deploying to staging"
+    echo ""
+
+    # Switch to staging branch
+    echo "→ Switching to $STAGING_BRANCH..."
+    git switch "$STAGING_BRANCH"
+
+    echo "→ Pulling latest $STAGING_BRANCH..."
+    git pull origin "$STAGING_BRANCH"
+
+    # Refresh DB if requested
+    if [[ "$refresh_db" == true ]]; then
+        run_hook "refresh_db" "$HOOK_REFRESH_DB" "staging"
+    fi
+
+    # Pre-deploy hook
+    run_hook "pre_deploy" "$HOOK_PRE_DEPLOY" "staging"
+
+    # Deploy
+    echo ""
+    echo "→ Deploying via Kamal..."
+    # shellcheck disable=SC2086
+    kamal deploy $kamal_dest_flag
+
+    # Post-deploy hook
+    run_hook "post_deploy" "$HOOK_POST_DEPLOY" "staging"
+
+    echo ""
+    echo "═══════════════════════════════════════"
+    echo "  ✓ Staging deployed"
+    echo "═══════════════════════════════════════"
+    [[ -n "$STAGING_URL" ]] && echo "  $STAGING_URL"
+}
+
+deploy_production() {
+    load_config
+
+    if ! yaml_section_exists "$CONFIG" "production"; then
+        echo "❌ Production not configured in deploy-config.yml"
+        exit 1
+    fi
+
+    local check=false
+    [[ "${1:-}" == "--check" ]] && check=true
+
+    local kamal_dest_flag=""
+    [[ -n "$PROD_KAMAL_DEST" ]] && kamal_dest_flag="-d $PROD_KAMAL_DEST"
+
+    local promote_from="${PROD_PROMOTE_FROM:-$SOURCE_BRANCH}"
+
+    if [[ "$check" == true ]]; then
+        echo "🔍 Deploy production check"
+        echo ""
+        echo "  Promote from: $promote_from"
+        echo "  Branch:       $PROD_BRANCH"
+        echo "  Kamal:        kamal deploy $kamal_dest_flag"
+        [[ -n "$PROD_URL" ]] && echo "  URL:          $PROD_URL"
+        [[ -n "$HOOK_BACKUP_DB" ]] && echo "  Backup hook:  $HOOK_BACKUP_DB"
+        echo ""
+
+        # Show what would be merged
+        git fetch origin "$PROD_BRANCH" --quiet 2>/dev/null || true
+        local prod_head
+        prod_head=$(git rev-parse "origin/$PROD_BRANCH" 2>/dev/null || git rev-parse "$PROD_BRANCH" 2>/dev/null)
+        local promote_head
+        promote_head=$(git rev-parse "$promote_from" 2>/dev/null)
+
+        if [[ "$prod_head" == "$promote_head" ]]; then
+            echo "✓ $PROD_BRANCH is up to date with $promote_from"
+        elif git merge-base --is-ancestor "$promote_head" "$prod_head" 2>/dev/null; then
+            echo "✓ $promote_from already merged into $PROD_BRANCH"
+        else
+            local unmerged
+            unmerged=$(git rev-list "$PROD_BRANCH".."$promote_from" --count 2>/dev/null)
+            echo "→ $unmerged commit(s) to promote from $promote_from"
+            echo ""
+            echo "Recent commits:"
+            git log "$PROD_BRANCH".."$promote_from" --oneline --max-count=10
+        fi
+        return
+    fi
+
+    # --- Execute production deploy ---
+
+    echo "🚀 Deploying to production"
+    echo ""
+
+    # Pull promote_from branch
+    echo "→ Pulling latest $promote_from..."
+    git switch "$promote_from"
+    git pull origin "$promote_from"
+
+    # Switch to production branch and merge
+    echo "→ Switching to $PROD_BRANCH..."
+    git switch "$PROD_BRANCH"
+    git pull origin "$PROD_BRANCH"
+
+    echo "→ Merging $promote_from into $PROD_BRANCH..."
+    # shellcheck disable=SC2086
+    git merge "$promote_from" $PROD_MERGE_STRATEGY
+
+    echo "→ Pushing $PROD_BRANCH..."
+    git push origin "$PROD_BRANCH"
+
+    # Backup hook (before deploy)
+    run_hook "backup_db" "$HOOK_BACKUP_DB" "production"
+
+    # Pre-deploy hook
+    run_hook "pre_deploy" "$HOOK_PRE_DEPLOY" "production"
+
+    # Deploy
+    echo ""
+    echo "→ Deploying via Kamal..."
+    # shellcheck disable=SC2086
+    kamal deploy $kamal_dest_flag
+
+    # Post-deploy hook
+    run_hook "post_deploy" "$HOOK_POST_DEPLOY" "production"
+
+    # Switch back to promote_from branch
+    echo "→ Switching back to $promote_from..."
+    git switch "$promote_from"
+
+    echo ""
+    echo "═══════════════════════════════════════"
+    echo "  ✓ Production deployed"
+    echo "═══════════════════════════════════════"
+    [[ -n "$PROD_URL" ]] && echo "  $PROD_URL"
+}
+
+# ==============================================================================
+# BOOT / STOP
+# ==============================================================================
+
+cmd_boot() {
+    load_config
+
+    local env="${1:-production}"
+    local kamal_dest_flag=""
+
+    case "$env" in
+        staging)
+            [[ -n "$STAGING_KAMAL_DEST" ]] && kamal_dest_flag="-d $STAGING_KAMAL_DEST"
+            ;;
+        production)
+            [[ -n "$PROD_KAMAL_DEST" ]] && kamal_dest_flag="-d $PROD_KAMAL_DEST"
+            ;;
+        *)
+            cmd_help boot; return
+            ;;
+    esac
+
+    echo "🟢 Booting $env..."
+    echo ""
+    # shellcheck disable=SC2086
+    kamal app boot $kamal_dest_flag
+
+    echo ""
+    echo "✓ $env application started"
+}
+
+cmd_stop() {
+    load_config
+
+    local env="${1:-production}"
+    local kamal_dest_flag=""
+
+    case "$env" in
+        staging)
+            [[ -n "$STAGING_KAMAL_DEST" ]] && kamal_dest_flag="-d $STAGING_KAMAL_DEST"
+            ;;
+        production)
+            [[ -n "$PROD_KAMAL_DEST" ]] && kamal_dest_flag="-d $PROD_KAMAL_DEST"
+            ;;
+        *)
+            cmd_help stop; return
+            ;;
+    esac
+
+    echo "🔴 Stopping $env..."
+    echo ""
+    # shellcheck disable=SC2086
+    kamal app stop $kamal_dest_flag
+
+    echo ""
+    echo "✓ $env application stopped"
+}
+
+# ==============================================================================
+# SETUP
+# ==============================================================================
+
+cmd_setup() {
+    if [[ "${1:-}" == "help" || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        cmd_help setup; return
+    fi
+
+    load_config
+
+    local check=false
+    local refresh_db=false
+
+    for arg in "$@"; do
+        case "$arg" in
+            --check) check=true ;;
+            --refresh-db) refresh_db=true ;;
+        esac
+    done
+
+    if [[ "$check" == true ]]; then
+        echo "🔍 Setup check"
+        echo ""
+        echo "  Server:     ${SERVER_HOST:-not configured}"
+        echo "  Refresh DB: hook=${HOOK_REFRESH_DB:-not configured}"
+        return
+    fi
+
+    if [[ "$refresh_db" == true ]]; then
+        if [[ -z "$HOOK_REFRESH_DB" ]]; then
+            echo "❌ hooks.refresh_db not configured in deploy-config.yml"
+            echo "   Run: dev-deploy init --hooks  (for example hook scripts)"
+            exit 1
+        fi
+        run_hook "refresh_db" "$HOOK_REFRESH_DB" "staging"
+        echo ""
+        echo "✓ Staging database refreshed"
+    else
+        echo "Usage: dev-deploy setup --refresh-db"
+        echo "  Run: dev-deploy setup --help  (for full options)"
+    fi
+}
+
+# ==============================================================================
+# HEALTH
+# ==============================================================================
+
+cmd_health() {
+    if [[ "${1:-}" == "help" || "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+        cmd_help health; return
+    fi
+
+    load_config
+
+    echo ""
+    echo "── Health Check ──"
+
+    # --- Apps ---
+    echo ""
+    echo "Apps"
+    echo ""
+
+    if command -v kamal &>/dev/null; then
+        if [[ -n "$PROD_KAMAL_DEST" ]]; then
+            local prod_dest="-d $PROD_KAMAL_DEST"
+        else
+            local prod_dest=""
+        fi
+
+        echo -n "→ Production: "
+        # shellcheck disable=SC2086
+        local prod_status
+        prod_status=$(kamal app details -q $prod_dest 2>/dev/null | sed -n 's/.*Up \([0-9]* [a-z]*\).*/\1/p' | head -1)
+        if [[ -n "$prod_status" ]]; then
+            echo "up ($prod_status)"
+        else
+            echo "down"
+        fi
+
+        if yaml_section_exists "$CONFIG" "staging" && [[ -n "$STAGING_KAMAL_DEST" ]]; then
+            echo -n "→ Staging:    "
+            local staging_status
+            staging_status=$(kamal app details -q -d "$STAGING_KAMAL_DEST" 2>/dev/null | sed -n 's/.*Up \([0-9]* [a-z]*\).*/\1/p' | head -1)
+            if [[ -n "$staging_status" ]]; then
+                echo "up ($staging_status)"
+            else
+                echo "stopped"
+            fi
+        fi
+    else
+        echo "  Kamal not found — skipping app checks"
+    fi
+
+    # --- Branches ---
+    echo ""
+    echo "Branches"
+    echo ""
+
+    # Fetch relevant branches
+    local fetch_branches="$PROD_BRANCH"
+    [[ -n "$STAGING_BRANCH" ]] && fetch_branches="$fetch_branches $STAGING_BRANCH"
+    [[ -n "$SOURCE_REMOTE_BRANCH" ]] && fetch_branches="$fetch_branches $SOURCE_REMOTE_BRANCH"
+    git fetch origin $fetch_branches --quiet 2>/dev/null || true
+
+    # Staging sync
+    if [[ -n "$STAGING_BRANCH" ]]; then
+        echo -n "→ $STAGING_BRANCH: "
+        local ahead behind
+        ahead=$(git rev-list "origin/$STAGING_BRANCH".."$STAGING_BRANCH" --count 2>/dev/null || echo "?")
+        behind=$(git rev-list "$STAGING_BRANCH".."origin/$STAGING_BRANCH" --count 2>/dev/null || echo "?")
+        if [[ "$ahead" -eq 0 && "$behind" -eq 0 ]]; then
+            echo "in sync with origin"
+        else
+            local status=""
+            [[ "$ahead" -gt 0 ]] && status="${ahead} ahead"
+            [[ "$behind" -gt 0 ]] && status="${status:+$status, }${behind} behind"
+            echo "$status"
+        fi
+
+        # Source merge status
+        if [[ -n "$SOURCE_REMOTE_NAME" && -n "$SOURCE_REMOTE_BRANCH" ]]; then
+            git fetch "$SOURCE_REMOTE_NAME" "$SOURCE_REMOTE_BRANCH" --quiet 2>/dev/null || true
+            echo -n "→ $SOURCE_REMOTE_BRANCH: "
+            local mirror_head merge_base
+            mirror_head=$(git rev-parse "$SOURCE_REMOTE_NAME/$SOURCE_REMOTE_BRANCH" 2>/dev/null)
+            merge_base=$(git merge-base "$STAGING_BRANCH" "$SOURCE_REMOTE_NAME/$SOURCE_REMOTE_BRANCH" 2>/dev/null || echo "")
+            if [[ "$merge_base" == "$mirror_head" ]]; then
+                echo "merged into $STAGING_BRANCH"
+            else
+                local unmerged
+                unmerged=$(git rev-list "$STAGING_BRANCH".."$SOURCE_REMOTE_NAME/$SOURCE_REMOTE_BRANCH" --count 2>/dev/null)
+                echo "${unmerged} commits not yet merged"
+            fi
+        fi
+    fi
+
+    # --- Server health hook ---
+    if [[ -n "$HOOK_HEALTH" ]]; then
+        run_hook "health" "$HOOK_HEALTH" ""
+    elif [[ -n "$SERVER_HOST" ]]; then
+        # Basic server checks if no custom hook
+        echo ""
+        echo "Server ($SERVER_HOST)"
+        echo ""
+
+        echo "→ Disk:"
+        ssh -p "$SERVER_PORT" -o ConnectTimeout=5 "$SERVER_HOST" \
+            "df -h / | tail -1 | awk '{printf \"  %s used of %s (%s free)\n\", \$3, \$2, \$4}'" \
+            2>/dev/null || echo "  connection failed"
+    fi
+
+    echo ""
+}
+
+# ==============================================================================
+# MAIN DISPATCH
+# ==============================================================================
+
+main() {
+    local cmd="${1:-help}"
+    shift 2>/dev/null || true
+
+    case "$cmd" in
+        init)       cmd_init "$@" ;;
+        stage)      cmd_stage "$@" ;;
+        deploy)     cmd_deploy "$@" ;;
+        boot)       cmd_boot "$@" ;;
+        stop)       cmd_stop "$@" ;;
+        setup)      cmd_setup "$@" ;;
+        health)     cmd_health "$@" ;;
+        help|-h|--help) cmd_help "$@" ;;
+        *)
+            echo "❌ Unknown command: $cmd"
+            echo ""
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
